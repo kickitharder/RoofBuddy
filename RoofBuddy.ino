@@ -1,28 +1,28 @@
 #include <Arduino.h>
-#define VERSION "RoofBuddy V0.220501 by keithrickard@hotmail.com$"
+#define VERSION "RoofBuddy V0.221207 by keithrickard@hotmail.com"
   
 /* Work commenced 14 Jan 2022 - For the Arduino Uno
 
-           +-----------------------+
-           |                       |
-           |                       o A5_SCL
-           |                       o A4_SDA
-           o                       o AREF
-           o                       o GND
-           o                       o 13  BUZZER
-       RST o                       o 12  DIR 
-       3V3 o                       o 11~ PWM
-        5V o                       o 10~ LED
-       GND o                       o 9~  TB_CXN
-       GND o                       o 8   TB_TXD
-+12V   VIN o                       o 7   TB_RXD
-           |                       o 6~  LX_CXN
-BATTERY A0 o                       o 5~  LX_TXD
-BT_MOVE A1 o                       o 4   LX_RXD
-BT_STOP A2 o                       o 3~  SW_CLOSED
-RG9     A3 o                       o 2   SW_OPEN
-RG9_VCC A4 o         ooo1          o 1TX
-RG9_VCC A5 o         ooo           o 0RX
+            +-----------------------+
+            |                       |
+            |                       o A5_SCL
+            |                       o A4_SDA
+            o                       o AREF
+            o                       o GND
+            o                       o 13  BUZZER
+        RST o                       o 12  DIR 
+        3V3 o                       o 11~ PWM
+         5V o                       o 10~ LED
+        GND o                       o 9~  TB_CXN
+        GND o                       o 8   TB_TXD
++12V    VIN o                       o 7   TB_RXD
+            |                       o 6~  LX_CXN
+BATTERY  A0 o                       o 5~  LX_TXD
+BTN_MOVE A1 o                       o 4   LX_RXD
+BTN_STOP A2 o                       o 3~  SW_CLOSED
+RG9      A3 o                       o 2   SW_OPEN
+RG9_VCC  A4 o         ooo1          o 1   TX
+RG9_VCC  A5 o         ooo           o 0   RX
             +-----------------------+
 
       ICSP
@@ -35,10 +35,10 @@ RG9_VCC A5 o         ooo           o 0RX
 
 #define SW_CLOSED   2             // Microswitch to indicate if roof is fully closed
 #define SW_OPEN     3             // Microswitch to indicate if roof is fully open
-#define LX_RXD      4             // TopBox Bluetooth module comms lines
+#define LX_RXD      4             // LX200 Bluetooth module comms lines
 #define LX_TXD      5             
 #define LX_CXN      6             // Indicates connection to LX200
-#define TB_RXD      7             // LX200 Bluetooth module comms lines
+#define TB_RXD      7             // TopBox Bluetooth module comms lines
 #define TB_TXD      8
 #define TB_CXN      9             // Indicates connection to TopBox
 #define LED         10            // Indicates RoofBuddy controller status
@@ -96,15 +96,16 @@ volatile int pwm;                       // 0 = stopped, >0 = moving
 volatile bool isr;                      // 1 = interrupt triggered
 int pwmFlag;
 
-char cmd, lastCmd;
+char cmd = 0;
+char lastCmd = 0;
 byte scopeSafe = 0;                     // Assume scope not in safe position
 byte dir = DIR_CLOSE;                   // 0 = close, 1 = open
 byte serial = 0;                        // 0 = Serial, 1 = TB
 byte stillParking = 0;
 char parkMode = '\0';
 int maxSpeed;
-byte tbBtn, flashType, flashPos, timedOut, itsRaining;
-unsigned long rampTimer, buttonTimer, flashTimer, moveTimer, parkingTimer, buzzerTimer;
+byte tbBtn, flashType, flashPos, timedOut, itsRaining, rainSensorPwr;
+unsigned long rampTimer, buttonTimer, flashTimer, moveTimer, parkingTimer, buzzerTimer, safetyTimer, rainTimer;
 
 bool test = 0;
 byte sw_open = 0;
@@ -113,7 +114,7 @@ byte safe_T = 1;
 byte park_T = 1;
 byte lx200_T = 1;
 int batt_T = 780;
-int rain_T = 0;                         // 0 = Dry, 1 = Rain
+int rain_T = 0;                       // 0 = Dry, 1 = Rain
 
 struct ee {
   float ha = 0.0;
@@ -142,43 +143,43 @@ void setup() {
   Serial.begin(9600);
   Serial.println(VERSION);
 
-  lastCmd = tbBtn = flashType = flashPos = timedOut = itsRaining = pwmFlag = pwm = moveTimer = 0;
+  lastCmd = tbBtn = flashType = flashPos = rainSensorPwr = timedOut = itsRaining = pwmFlag = pwm = moveTimer = rainTimer = safetyTimer = 0;
   motorControl();
-  resetRainSensor();
+  rainSensor(2);                      // Switch on rain sensor
   TB.begin(9600);
   LX.begin(9600);
   TB.setTimeout(2000);
   LX.setTimeout(1000);
 
   digitalWrite(BUZZER, HIGH);
-  if (button(BTN_OPEN)){
-    buzz(2000);
+  if (button(BTN_OPEN)){              // Enter button test mode
+    buzz(1000);
     hardwareTest();
   }
-  if (button(BTN_CLOSE)){
-    buzz(2000);
+  if (button(BTN_CLOSE)){             // Enter override mode
+    buzz(1000);
     override();
   }
   readEE();
-  Serial.print(F("Park HA:  "));
-  Serial.println(ee.ha, 1);
-  Serial.print(F("Park Dec: "));
-  Serial.println(ee.dec);
   TB.listen();
-  buzz(100);
+  buzz(-100);
   dir = (roofClosed() ? DIR_CLOSE : DIR_OPEN);
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void loop() {
   serviceLED();
-  if (ee.rain) if (!itsRaining) if (rainSensor()) rainDetected();             // Take action if it is raining (ee.wet = 0 means trigger switched off)
-  digitalWrite(BUZZER, (millis() < buzzerTimer));                             // Turn off the buzzer if buzzer timer has expired
+  actIfRaining();
+  digitalWrite(BUZZER, (millis() < buzzerTimer));                             // Turn off the buzzer if its timer has expired
   TB.listen();
   moveRoof();                                                                 // Service the moving of the roof
   if (TB.available()) commands(1);                                            // See if the TopBox is talking to us
   if (Serial.available()) commands(0);                                        // See if the PC is talking to us.
   if (stillParking) parkingCheck();                                           // See if LX200 is parking
+  if (!roofClosed()) rainSensor(1);                                           // If roof is not closed then turn on the rain sensor
+  if (pwm) if (!tbBtn) if (safetyTimer) if (millis() > safetyTimer) halt(10); // If no safety info received then stop moving roof
 }
+//==================================================================================================================================================
+// COMMANDS
 //==================================================================================================================================================
 void commands(byte s) {
   serial = s;
@@ -187,17 +188,18 @@ void commands(byte s) {
     Serial.print("Received from "); Serial.print(s ? "TopBox: " : "PC: "); Serial.println(cmd);
   }
   switch (cmd) {
+    case '^': return;                     break;    // Soak up prefix character if if exists
     case '\n': return;                    break;    // Soak up lineeed character
     case '\r': return;                    break;    // Soak up carriage return character
     case '$': return;                     break;    // Soak up '$' terminator character
-    case 'e': getTerm();                  break;    // Returns 'e' meaning RoofBuddy is responding
+    case 'e': rainSensor(1);              break;    // Returns 'e' meaning RoofBuddy is responding. Also, turn on the rain sensor
     case 'O': openRoof();                 break;    // Open roof completely
     case 'o': topBoxOpen();               break;    // TopBox open button has been pressed to open roof
     case 'C': closeRoof();                break;    // Close roof completely
     case 'c': topBoxClose();              break;    // TopBox open button has been pressed to close roof
     case 's': status();                   break;    // 'C' = Closed, 'c' = closing, 'O' = Opened, 'o' = Opening, 'H' = Stopped, etc
     case 'b': getBattery();               break;    // Returns battery voltage. >= 12.5V = OK, < 12.5V = Charge battery
-    case 'R': resetRainSensor();          break;    // Reset Rain Sensor
+    case 'R': rainSensor(2);              break;    // Restart Rain Sensor
     case 'r': getRainSensor();            break;    // Returns: 1 = wet, 0 = dry
     case 'I': itsRaining = 1;             break;
     case 'i': itsRaining = 0;             break;
@@ -228,6 +230,7 @@ void commands(byte s) {
     case 'Z': testCmds();                 break;    // Test mode commands
     case 'F': formatEE();                 break;    // Re-format EEPROM
     case 'S': Serial.println(scopeSafe);  break;    // Return what RB thinks is the scope safety
+    case '/': asm volatile ("jmp 0");     break;    // Restart the Arduino
     default: cmd = '%';                   break;    // Say what?
   }
   if (cmd) {
@@ -243,15 +246,61 @@ void commands(byte s) {
   Serial.println('$');
   TB.flush();
 }
-//==================================================================================================================================================
-void topBoxOpen() {       // ^o
-  Serial.println(F("topBoxOpen()"));                        // The OPEN button on the TopBox is being pressed
-  tbBtn = 1;                                                // TopBox button invoked this action
-  buzz(-100);
-  openRoof();                                               // Try and get the roof to open
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void testCmds() {         // Z
+  Serial.print(F("testCmds() => Received: "));
+  char buf[] = "\0\0\0";
+  serial ? TB.readBytesUntil('$', buf, 1) : Serial.readBytesUntil('$', buf, 1);
+  cmd = buf[0];
+  Serial.println(cmd);
+
+  switch (cmd) {
+    case 'O':   roofO();      break;  // 'roof open'
+    case '>':   roofO();      break;  // 'roof open'
+    case 'C':   roofC();      break;  // 'roof closed'
+    case '<':   roofC();      break;  // 'roof closed'
+    case 'H':   roofH();      break;  // 'roof partly open'
+    case '-':   roofH();      break;  // 'roof partly open'
+    case 'b':   battT(0);     break;  // 'battery bad'
+    case 'B':   battT(1);     break;  // 'battery good'
+    case 'r':   rainT(0);     break;  // 'not raining'
+    case 'R':   rainT(1);     break;  // 'raining'
+    case 'P':   parkT(1);     break;  // 'scope' not parked
+    case 'p':   parkT(0);     break;  // 'scope' parked
+    case 'l':   lx200T(0);    break;  // 'LX200 not repsonding'
+    case 'L':   lx200T(1);    break;  // 'LX200 responding'
+    case 's':   safeT(0);     break;  // 'scope' not safe
+    case 'S':   safeT(1);     break;  // 'scope' safe
+    case 'v':   testStatus(); break;  // Show test mode status
+    case '?':   testStatus(); break;  // Show test mode status
+    case 'T':                         // Flip test mode status
+      test = !test;
+      sw_closed = sw_open = 0;
+      Serial.print(F("=> ")); Serial.println(test ? F("TEST MODE") : F("LIVE MODE"));
+      break;
+    default:  break;
+  }
+  return;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getTerm() {
+  if (!cmd) return;
+  unsigned long findTimer = millis() + 100;
+  while (millis() < findTimer) {
+    switch (serial ? TB.read() : Serial.read()) {
+      case '$':   return;                   break;
+      case '\n':  return;                   break;
+      case '\r':  return;                   break;
+      case -1:                              break;
+      default: findTimer = millis() + 100;  break;
+    }
+  }
 }
 //==================================================================================================================================================
+// ROOF STUFF
+//==================================================================================================================================================
 void openRoof() {         // ^O
+  rainSensor(3);                                            // Turn on the roof sensor
   if (cmd) getTerm();
   Serial.print(F("openRoof() "));                           // Try and get the roof to start opening
 
@@ -262,7 +311,7 @@ void openRoof() {         // ^O
     if (!cmd) cmd = OPENED;
     return;
   }
-  if (rainSensor()){
+  if (startedRaining()){
     Serial.println(F("=> RAIN - OPENING ABORT"));
     halt(1);
     cmd = RAIN_OPEN;
@@ -306,14 +355,7 @@ void openRoof() {         // ^O
     }
   }
 }
-//==================================================================================================================================================
-void topBoxClose() {      // ^c
-  Serial.println(F("topBoxClose()"));                       // The CLOSE button on the TopBox is being pressed
-  tbBtn = 1;                                                // TopBox button invoked this action
-  buzz(-100);
-  closeRoof();                                              // Try and get the roof to close
-}
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void closeRoof() {        // ^C
   if (cmd) getTerm();
   Serial.print(F("closeRoof() "));                          // Try and get the roof to start closing
@@ -363,6 +405,32 @@ void closeRoof() {        // ^C
     }
   }
 }
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void topBoxOpen() {       // ^o
+  Serial.println(F("topBoxOpen()"));                        // The OPEN button on the TopBox is being pressed
+  tbBtn = 1;                                                // TopBox button invoked this action
+  buzz(-100);
+  openRoof();                                               // Try and get the roof to open
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void topBoxClose() {      // ^c
+  Serial.println(F("topBoxClose()"));                       // The CLOSE button on the TopBox is being pressed
+  tbBtn = 1;                                                // TopBox button invoked this action
+  buzz(-100);
+  closeRoof();                                              // Try and get the roof to close
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+bool roofOpen() {
+  if (test) return sw_open;
+  return (digitalRead(SW_OPEN));    // 0 = roof not fully open, 1 = fully open (switch closed)
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+bool roofClosed() {
+  if (test) return sw_closed;
+  return (digitalRead(SW_CLOSED));  // 0 = roof not fully closed, 1 = fully closed (switch closed)
+}
+//==================================================================================================================================================
+// PARKING TELESCOPE STUFF
 //==================================================================================================================================================
 char startParking() {      // ^_                          // Park scope, 0 = can't park, 1 = parked, P = parking
   if (cmd == '_'){
@@ -415,7 +483,7 @@ char startParking() {      // ^_                          // Park scope, 0 = can
 // #:Sr23:59:59#:Sd+90:00:00#:MS#\0
 // 0123456789012345678901234567890
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void parkingCheck () {
   if (TB.available()) return;                                   // Quit immediately if TopBox has sent something
   if (millis() > parkingTimer) parking();
@@ -436,7 +504,7 @@ void parkingCheck () {
     default: parkMode = 0;                break;
   }
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void parking() {                                                  // Determines if telescope is still slewing to home position
   Serial.print(F("parking() =>"));
   Serial.println(parkMode);
@@ -464,7 +532,7 @@ void parking() {                                                  // Determines 
     TB.listen();
   } else stillParking = 1;                                        // Lost connection - assume still parking
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 char isParked() {         // ^p
   getTerm();
   Serial.println(F("isParked()"));
@@ -492,6 +560,45 @@ char isParked() {         // ^p
   Serial.println((cmd == '0') ? F("=> not parked") : F("=> parked"));
   return cmd;
 }
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void stopParking () {     // ^Q stop parking, and roof from moving if it is already
+  Serial.println(F("\nstopParking()"));
+  LX.listen();
+  LX.print(F("#:Qn#:Qe#:Qs#:Qw#:Q#:Q#:Q#:Q#:Q#:Q#:Sw3#"));    // Kill all slewing
+  TB.listen();
+  parkMode = stillParking = 0;
+  if (pwm) halt(3);
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+char lx200() {            // ^l                             // Sees if LX200 is connected and responding
+  if (cmd) getTerm();
+  Serial.print(F("lx200() "));
+  cmd = '0';                                                // Start off assuming not connected
+  if (test){
+    cmd = lx200_T + '0';
+  } else {
+    if (digitalRead(LX_CXN)) {
+      char buf[2];
+      buf[0] = buf[1] = 0;
+      LX.listen();                                          // Select Bluetooth module for the LX200
+      LX.print(F("#:\x06#"));                               // Ask for mount mode to see if LX200 responds
+      LX.readBytes(buf, 1);
+      TB.listen();                                          // Select Bluetooth module for the TopBox
+      Serial.print(F("=> Sent #:[6]#\n=> Got: "));
+      Serial.println(buf);
+      switch (buf[0]) {                                     // If response is A, L or P then LX200 is connected
+        case 'A': cmd = '2';  break;                        // 1 = LX200 connected
+        case 'L': cmd = '1';  break;
+        case 'P': cmd = '3';  break;
+        default:  cmd = '0';  break;
+      }
+    }
+  }
+  Serial.println( (cmd == '0') ? F("=> LX200 not responding") : F("=> LX200 is responding"));
+  return cmd;
+}
+//==================================================================================================================================================
+// MOVING ROOF STUFF
 //==================================================================================================================================================
 void moveRoof() {
   if (!pwm) {                                                           // See if roof is moving - act if not
@@ -548,6 +655,7 @@ void moveRoof() {
   if (isr) {
     moveTimer = parkingTimer = parkMode = tbBtn = pwm = isr = 0;
     maxSpeed = ee.maxSpeed;
+    if (DIR == DIR_CLOSE) rainSensor(0);                // Switch off the rain sensor to save power
   }
 
   //if (!pwm || pwm >= maxSpeed) if (stillParking) if (millis() > parkingTimer) parking();
@@ -562,7 +670,7 @@ void moveRoof() {
     }
   }
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void motorControl() {
   if (pwm < pwmFlag) {
     if (pwm > 1) Serial.print(F("motorControl()\nSlowing down to 0 from ")); Serial.println(pwmFlag);
@@ -583,7 +691,7 @@ void motorControl() {
             pwm = maxSpeed;
             pwmFlag = -1;
     }
-    if (ee.battery && !rainSensor()) {
+    if (ee.battery && !startedRaining()) {
       if (battSensor() / SENSE_ADJ <= BATT_BAD) {
         Serial.println(F("motorControl()\nNo power from battery - motor stopped")); // Don't want Arduino to power the motor!
         pwm = 0;
@@ -607,63 +715,7 @@ void motorControl() {
   digitalWrite(DIR, dir);                                                           // Set motor direction
   analogWrite(PWM, test ? 0 : pwm);                                                 // Adjust motor speed
 }
-//===================================================================================================================================================
-char lx200() {            // ^l                             // Sees if LX200 is connected and responding
-  if (cmd) getTerm();
-  Serial.print(F("lx200() "));
-  cmd = '0';                                                // Start off assuming not connected
-  if (test){
-    cmd = lx200_T + '0';
-  } else {
-    if (digitalRead(LX_CXN)) {
-      char buf[2];
-      buf[0] = buf[1] = 0;
-      LX.listen();                                          // Select Bluetooth module for the LX200
-      LX.print(F("#:\x06#"));                               // Ask for mount mode to see if LX200 responds
-      LX.readBytes(buf, 1);
-      TB.listen();                                          // Select Bluetooth module for the TopBox
-      Serial.print(F("=> Sent #:[6]#\n=> Got: "));
-      Serial.println(buf);
-      switch (buf[0]) {                                     // If response is A, L or P then LX200 is connected
-        case 'A': cmd = '2';  break;                        // 1 = LX200 connected
-        case 'L': cmd = '1';  break;
-        case 'P': cmd = '3';  break;
-        default:  cmd = '0';  break;
-      }
-    }
-  }
-  Serial.println( (cmd == '0') ? F("=> LX200 not responding") : F("=> LX200 is responding"));
-  return cmd;
-}
-//==================================================================================================================================================
-void rainDetected() {
-  Serial.println(F("rainDetected()"));
-  buzz(-5000);
-  maxSpeed = 255;
-  cmd = 0;
-  closeRoof();
-}
-//==================================================================================================================================================
-void scopeSafeStatus(byte v) { // ^T Respond to TopBox's announcement's of scope's safety
-  Serial.print(F("scopeSafeStatus() => "));
-  scopeSafe = v;
-  if (!ee.safe) {
-    scopeSafe = 1;
-  }
-  else if(test) scopeSafe = safe_T;
-  Serial.println(scopeSafe ? F("Scope is safe") : F("SCOPE NOT SAFE"));
-  cmd = 0;
-}
-//==================================================================================================================================================
-void stopParking () {     // ^Q stop parking, and roof from moving if it is already
-  Serial.println(F("\nstopParking()"));
-  LX.listen();
-  LX.print(F("#:Qn#:Qe#:Qs#:Qw#:Q#:Q#:Q#:Q#:Q#:Q#:Sw3#"));    // Kill all slewing
-  TB.listen();
-  parkMode = stillParking = 0;
-  if (pwm) halt(3);
-}
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void halt(byte h) {       // ^H
   noInterrupts();
   detachInterrupt(digitalPinToInterrupt(SW_CLOSED));
@@ -671,16 +723,16 @@ void halt(byte h) {       // ^H
   isr = 0;
   interrupts();
   if (pwm) pwmFlag = pwm;
-  moveTimer = parkingTimer = tbBtn = pwm = 0;             // moveTimer is reset as roof is no longer moving
+  moveTimer = safetyTimer = parkingTimer = tbBtn = pwm = 0;   // moveTimer is reset as roof is no longer moving
   if (stillParking) stopParking();
   motorControl();
 //  getTerm();
   maxSpeed = ee.maxSpeed;
   Serial.print(F("halt(")); Serial.print(h); Serial.println(')');
   Serial.println(F("=> Stopped "));
-  buzz(-500);                                             // Start buzzing
+  buzz(-500);                                                 // Start buzzing
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void slowHalt(byte h) {   // ^h
   noInterrupts();
   detachInterrupt(digitalPinToInterrupt(SW_CLOSED));
@@ -700,192 +752,87 @@ void slowHalt(byte h) {   // ^h
   maxSpeed = ee.maxSpeed;
   getTerm();
   if (stillParking) stopParking();
-  moveTimer =  pwmFlag = tbBtn = 0;                       // moveTimer is reset as roof is no longer moving
+  moveTimer = safetyTimer =  pwmFlag = tbBtn = 0;         // moveTimer is reset as roof is no longer moving
   Serial.println(F("=> Stopped "));
   buzz(-500);                                             // Start buzzing
 }
-//==================================================================================================================================================
-void lx200cmd() {         // ^:
-  getTerm();
-  Serial.print(F("lx200cmd() "));                         // Sends LX200 command and returns any response from the LX200
-  cmd = '%';                                              // Assume this is going fail
-  char buf[34];
-  for (byte i = 0; i <= 33; i++) buf[i] = 0;              // Clear the buffer
-  if (!Serial.readBytesUntil('#', buf, 33)) return;       // Get command for the LX200 into the buffer
-  Serial.print(F("=> :"));
-  Serial.print(buf);
-  Serial.println('#');
-  if (!digitalRead(LX_CXN)) return;                       // Quit if no Bluetooth connection with LX200
-  LX.listen();                                            // Now get the LX200's attention
-  LX.print(F("#:")); LX.print(buf); LX.print('#');        // Send command and terminator
-  for (byte i = 0; i <= 33; i++) buf[i] = 0;              // Clear the buffer
-  LX.readBytesUntil('#', buf, 33);                        // Get LX200 response, if any
-  TB.listen();                                            // Thank you LX200.  Now listen to the TopBox again
-  if (buf[0]) {                                           // If there is a repsonse the send it to the TopBox
-    Serial.print(F("=>")); Serial.print(buf); Serial.println('#');
-    if (serial) TB.print(buf);
-    cmd = 0;
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void stopISR() {                                      // Come here if either the SW_OPEN or SW_CLOSED switch has been activated
+  noInterrupts();
+  if (!digitalRead(dir == DIR_CLOSE ? SW_CLOSED : SW_OPEN)){
+    interrupts();
+    return;
+  }
+  analogWrite(PWM, 0);                                // Stop the motor immediately
+  detachInterrupt(digitalPinToInterrupt(SW_CLOSED));
+  detachInterrupt(digitalPinToInterrupt(SW_OPEN));
+  interrupts();
+  isr = 1;                                            // Mark that interrupt has been triggered
+  pwm = 0;
+  Serial.print(F("ISR triggered halt: ")); Serial.println((dir == DIR_CLOSE) ? "CLOSE switch" : "OPEN switch");
+  for(byte i = 0; i < 6; i++){
+    digitalWrite(BUZZER, HIGH);
+    delay(50);
+    digitalWrite(BUZZER, LOW);
+    delay(100);
   }
 }
-//==================================================================================================================================================
-void version() {          // ^V
-  getTerm();
-  if (serial) TB.print(VERSION);
-  Serial.println(VERSION);
-  cmd = 0;
-}
-//==================================================================================================================================================
-void getBattery() {       // ^b
-  getTerm();
-  float v = battSensor();                                    // Read battery voltage - probably won't be accurate if roof is moving
-  Serial.print(F("getBattery() => "));
-  Serial.println(v);
-  v /= SENSE_ADJ;
-  Serial.print(F("=> "));
-  Serial.println(v);
-  if (serial) TB.print(v, 1);
-  cmd = 0;
-}
-//==================================================================================================================================================
-void resetRainSensor() {  // ^R
-  getTerm();
-  Serial.println(F("resetRainSensor()"));
-  digitalWrite(RG9_VCC1, LOW);
-  digitalWrite(RG9_VCC2, LOW);
-  delay(1000);
-  digitalWrite(RG9_VCC1, HIGH);
-  digitalWrite(RG9_VCC2, HIGH);
-  delay(1000);
-  itsRaining = 0;
-}
-//==================================================================================================================================================
-void getRainSensor() {    // ^r
-  getTerm();
-  Serial.print(F("getRainSensor() =>"));
-  cmd = (char)(rainSensor() + '0');
-  Serial.println(cmd == '0' ?  F("Dry") : F("Wet"));
-}
-//==================================================================================================================================================
-void setDEC() {           // ^D
-  Serial.print(F("setDEC() => "));
-  ee.dec =  serial ? TB.parseFloat() : Serial.parseFloat(); // Get scope's home position's Dec
-  getTerm();
-  Serial.println(ee.dec);
-  writeEE();                                                // Save this to EEPROM
-}
-//==================================================================================================================================================
-void getDEC() {           // ^d
-  getTerm();
-  Serial.print(F("getDEC() => "));
-  if (serial) TB.print(ee.dec);                             // Return the stored scope's home position's Dec
-  Serial.println(ee.dec);
-  cmd = 0;
-}
-//==================================================================================================================================================
-void setHA() {            // ^A
-  Serial.println(F("setHA() => "));
-  ee.ha = serial ? TB.parseFloat() : Serial.parseFloat();   // Get scope's home position's Hour Angle
-  getTerm();
-  Serial.print(ee.ha); Serial.println('$');
-  writeEE();                                                // Save this to EEPROM
-}
-//==================================================================================================================================================
-void getHA() {            // ^a
-  getTerm();
-  Serial.print(F("getHA() => "));
-  if (serial) TB.print(ee.ha);                                // Return the stored scope's parked Hour Angle
-  Serial.print(ee.ha);
-  cmd = 0;
-}
-//==================================================================================================================================================
-void setMoveTimer() {     // ^M
-  Serial.print(F("setMoveTimer() => "));
-  ee.movePeriod =  serial ? TB.parseInt() : Serial.parseInt(); // Get scope's home position's Dec
-  getTerm();
-  Serial.println(ee.movePeriod);
-  writeEE();                                                  // Save this to EEPROM
-}
-//==================================================================================================================================================
-void getMoveTimer() {     // ^m
-  getTerm();
-  Serial.print(F("getMoveTimer() => "));
-  if (serial) {
-    TB.print(ee.movePeriod);                                  // Return the stored scope's home position's Dec
-  }
-  Serial.print(ee.movePeriod);
-  cmd = 0;  
-}
-//==================================================================================================================================================
-void setParameters() {    // ^U
-  Serial.print(F("setParameters() => "));
-  char buf[3] = {0, 0, 0};
-  serial ? TB.readBytesUntil('$', buf, 2) : Serial.readBytesUntil('$', buf, 2);
-  Serial.println(buf[0]);
-  switch (buf[0]) {
-    case 'P': ee.park = 1;      break;      // UP
-    case 'p': ee.park = 0;      break;      // Up
-    case 'I': ee.isParked = 1;  break;      // UI
-    case 'i': ee.isParked = 0;  break;      // Ui
-    case 'S': ee.safe = 1;      break;      // US
-    case 's': ee.safe = 0;      break;      // Us
-    case 'B': ee.battery = 1;   break;      // UB
-    case 'b': ee.battery = 0;   break;      // Ub
-    case 'R': ee.rain = 1;      break;      // UR
-    case 'r': ee.rain = 0;      break;      // Ur
-    default: cmd = '%';         break;  
-  }
-  if (cmd != '%') writeEE();
-}
-//==================================================================================================================================================
-void getParameters() {    // ^u
-  Serial.print(F("getParameters() => "));
-  char buf[3] = {0, 0, 0};
-  serial ? TB.readBytesUntil('$', buf, 2) : Serial.readBytesUntil('$', buf, 2);
-  Serial.println(buf[0]);
-  switch (buf[0]) {
-    case 'P': buf[1] = '0' + ee.park;     break;    // uP
-    case 'I': buf[1] = '0' + ee.isParked; break;    // uI
-    case 'S': buf[1] = '0' + ee.safe;     break;    // uS
-    case 'B': buf[1] = '0' + ee.battery;  break;    // uB
-    case 'R': buf[1] = '0' + ee.rain;     break;    // uR
-    default: cmd = '%';                   break;
-  }
-  if (cmd != '%') {
-    if (serial) {
-      TB.print(buf[1]);
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void override(){
+  digitalWrite(LED,((millis() & B10000) > 0));                           // Sawtooth flash = all is OK. Cycles every 4096ms 
+  byte pwm = 0;
+  while(1) {
+    if (button(BTN_CLOSE) && !digitalRead(SW_CLOSED)) {
+      while(!button(BTN_OPEN) && !digitalRead(SW_CLOSED)) {
+        pwm ? delay(10) : buzz(50);
+        if (pwm < 191) pwm++;
+        digitalWrite(DIR, DIR_CLOSE);
+        analogWrite(PWM, pwm);
+      }
     }
-    Serial.print(buf[1]);
-    cmd = 0;
+
+    if(pwm) {
+      pwm = 0;
+      analogWrite(PWM, pwm);
+      buzz(50);
+    }
+
+    if (button(BTN_OPEN) && !digitalRead(SW_OPEN)) {
+      while(!button(BTN_CLOSE) && !digitalRead(SW_OPEN)) {
+        pwm ? delay(10) : buzz(50);
+        if (pwm < 191) pwm++;
+
+        digitalWrite(DIR, DIR_OPEN);
+        analogWrite(PWM, pwm);
+      }
+    }
+
+    if(pwm) {
+      pwm = 0;
+      analogWrite(PWM, pwm);
+      buzz(50);
+    }
   }
 }
-//==================================================================================================================================================
-void setMaxSpeed() {      // ^X
-  Serial.print(F("setMaxSpeed() => "));
-  ee.maxSpeed = maxSpeed =  serial ? TB.parseInt() : Serial.parseInt(); // Get scope's home position's Dec
-  getTerm();
-  Serial.println(ee.maxSpeed);
-  writeEE();                                                            // Save this to EEPROM
-}
-//==================================================================================================================================================
-void getMaxSpeed() {      // ^x
-  getTerm();
-  Serial.print(F("getMaxSpeed() => "));
-  if (serial) TB.print(ee.maxSpeed);                          // Return the maximum speed for roof (0 to 255)
-  Serial.print(ee.maxSpeed);
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void scopeSafeStatus(byte v) { // ^T Respond to TopBox's announcement's of scope's safety
+  Serial.print(F("scopeSafeStatus() => "));
+  scopeSafe = v;
+  if (!ee.safe) {
+    scopeSafe = 1;
+  }
+  else if(test) scopeSafe = safe_T;
+  Serial.println(scopeSafe ? F("Scope is safe") : F("SCOPE NOT SAFE"));
+  safetyTimer = millis() + 5000;
   cmd = 0;
 }
-//==================================================================================================================================================
-void getMovePercent() {   // ^g
-  Serial.print(F("getMoveProg() => "));
-  long v = moveTimer - millis();
-  if (v < 0) v = 0;
-  v = 100 - v / (10 * ee.movePeriod);
-  getTerm();
-  if (serial) TB.print(v);
-  Serial.print(v);
-  cmd = 0;
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+int scopeSafeCheck() {
+  if (!ee.safe) return 1;      // Ignore scope's safety - return 'safe'
+  if (test) return safe_T;
+  return scopeSafe;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void status() {           // ^s
   getTerm();
   Serial.println(F("status()"));
@@ -914,7 +861,7 @@ void status() {           // ^s
     cmd = (dir == DIR_OPEN ? BATT_OPEN : BATT_CLOSE);            // Battery voltage no longer OK
     return;
   }
-  if (rainSensor() || itsRaining) {
+  if (startedRaining() || itsRaining) {
     cmd = (dir == DIR_OPEN ? RAIN_OPEN : RAIN_CLOSE);            // Raining while moving roof
     return;
   }
@@ -942,8 +889,283 @@ void status() {           // ^s
     s = SAFE_OPEN   Telescope no longer safe while opening
     S = SAFE_CLOSE  Telescope no longer safe while closing
     l = LXCXN_OPEN  Telescope not repsonding while parking to open
-    L = LXCXN_CLOSE Telescepe not responding while parking to open
+    L = LXCXN_CLOSE Telescepe not responding while parking to close
     */
+//==================================================================================================================================================
+// BATTERY STUFF
+//==================================================================================================================================================
+void getBattery() {       // ^b
+  getTerm();
+  float v = battSensor();                                    // Read battery voltage - probably won't be accurate if roof is moving
+  Serial.print(F("getBattery() => "));
+  Serial.println(v);
+  v /= SENSE_ADJ;
+  Serial.print(F("=> "));
+  Serial.println(v);
+  if (serial) TB.print(v, 1);
+  cmd = 0;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+int battSensor() {
+  if (!ee.battery) return 780;  // Ignore battery sensor - return 'good'
+  if (test) return batt_T;
+  return analogRead(BATTERY);
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+bool batteryCheck() {
+  return ((battSensor() / SENSE_ADJ) > BATT_BAD);
+}
+//==================================================================================================================================================
+// RAIN SENSOR STUFF
+//==================================================================================================================================================
+void actIfRaining() {
+  if (!ee.rain) return;               // Return if rain is not to be detected
+  if (itsRaining) return;             // Return if we know it's already raining
+  if (roofClosed()) return;           // Return if roof is closed - who cares if it's raining!
+  if (millis() < rainTimer) return;   // Return if rain sensor is still booting up
+  if (!startedRaining()) return;      // Return if not started raining
+
+  Serial.println(F("actIfRaining()"));
+  buzz(-5000);
+  maxSpeed = 255;                     // Move the roof quickly
+  cmd = 0;
+  closeRoof();
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void rainSensor(byte m) { // ^R     0 = turn off, 1 = turn on, 2 = restart (off/on), just turn on rain sensor
+  if (m == rainSensorPwr)  return;
+  Serial.print(F("rainSensor() => "));
+  switch (m) {
+    case 0:     Serial.println(F("Off"));         break;
+    case 1:     Serial.println(F("On"));          break;
+    case 2:     Serial.println(F("Restart"));     break;
+    case 3:     Serial.println(F("Force on"));    break;
+    default:                                      break;
+  }
+  if (m < 3) if (cmd == 'R' || cmd == 'e')  getTerm();
+  if (m == 0 || m == 2) {                         // Turn sensor off
+    digitalWrite(RG9_VCC1, LOW);
+    digitalWrite(RG9_VCC2, LOW);
+    rainTimer = 0;
+    if (m == 2) delay(1000);
+    rainSensorPwr = 0;
+  }
+  if (m > 0) {                                    // Turn sensor on
+    if (digitalRead(RG9_VCC1) == LOW) {
+      rainTimer = millis() + 11000;               // If not actually on, start 11 second timer to allow time for rain sensor to initialise
+      itsRaining = 0;
+      digitalWrite(RG9_VCC1, HIGH);
+      digitalWrite(RG9_VCC2, HIGH);
+      rainSensorPwr = 1;    }
+  }
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getRainSensor() {    // ^r
+  getTerm();
+  Serial.print(F("getRainSensor() =>"));
+  cmd = (char)(startedRaining() + '0');
+  Serial.println(cmd == '0' ?  F("Dry") : F("Wet"));
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+bool startedRaining() {
+  if (!ee.rain) return (itsRaining = 0);        // Ignore rain sensor - return 'dry'
+  if (test) return (itsRaining = rain_T);       // Return test mode value
+  return (itsRaining = !digitalRead(RG9));      // RG9 = 0 means it's raining so return 1 if so, 0 if not.
+}
+//==================================================================================================================================================
+// PROPERTIES
+//==================================================================================================================================================
+void setParameters() {    // ^U
+  Serial.print(F("setParameters() => "));
+  char buf[3] = {0, 0, 0};
+  serial ? TB.readBytesUntil('$', buf, 2) : Serial.readBytesUntil('$', buf, 2);
+  Serial.println(buf[0]);
+  switch (buf[0]) {
+    case 'P': ee.park = 1;                        break;      // UP
+    case 'p': ee.park = 0;                        break;      // Up
+    case 'I': ee.isParked = 1;                    break;      // UI
+    case 'i': ee.isParked = 0;                    break;      // Ui
+    case 'S': ee.safe = 1;                        break;      // US
+    case 's': ee.safe = 0;                        break;      // Us
+    case 'B': ee.battery = 1;                     break;      // UB
+    case 'b': ee.battery = 0;                     break;      // Ub
+    case 'R': ee.rain = 1;                        break;      // UR
+    case 'r': rainSensor(cmd = ee.rain = 0);      break;      // Ur
+    default: cmd = '%';                           break;  
+  }
+  if (cmd != '%') writeEE();
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getParameters() {    // ^u
+  Serial.print(F("getParameters()\n=> "));
+  char buf[3] = {0, 0, 0};
+  serial ? TB.readBytesUntil('$', buf, 2) : Serial.readBytesUntil('$', buf, 2);
+  Serial.println(buf[0]);
+  switch (buf[0]) {
+    case 'P': buf[1] = '0' + ee.park;       break;    // uP
+    case 'I': buf[1] = '0' + ee.isParked;   break;    // uI
+    case 'S': buf[1] = '0' + ee.safe;       break;    // uS
+    case 'B': buf[1] = '0' + ee.battery;    break;    // uB
+    case 'R': buf[1] = '0' + ee.rain;       break;    // uR
+    case 'A': getAllParameters();           break;    // Get all parameters
+    default: cmd = '%';                     break;
+  }
+  if (cmd != '%') {
+    if (serial) {
+      TB.print(buf[1]);
+    }
+    Serial.print(buf[1]);
+    cmd = 0;
+  }
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getAllParameters() {
+  TB.print(ee.ha); TB.print(' ');
+  TB.print(ee.dec); TB.print(' ');
+  TB.print(ee.park); TB.print(' ');
+  TB.print(ee.isParked); TB.print(' ');
+  TB.print(ee.safe); TB.print(' ');
+  TB.print(ee.battery); TB.print(' ');
+  TB.print(ee.rain); TB.print(' ');
+  TB.print(ee.movePeriod); TB.print(' ');
+  TB.print(ee.maxSpeed); TB.print(' ');
+  TB.println(VERSION);
+
+  Serial.print(ee.dec); Serial.print(' ');
+  Serial.print(ee.dec); Serial.print(' ');
+  Serial.print(ee.park); Serial.print(' ');
+  Serial.print(ee.isParked); Serial.print(' ');
+  Serial.print(ee.safe); Serial.print(' ');
+  Serial.print(ee.battery); Serial.print(' ');
+  Serial.print(ee.rain); Serial.print(' ');
+  Serial.print(ee.movePeriod); Serial.print(' ');
+  Serial.print(ee.maxSpeed); Serial.print(' ');
+  Serial.println(VERSION);
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void setDEC() {           // ^D
+  Serial.print(F("setDEC() => "));
+  ee.dec =  serial ? TB.parseFloat() : Serial.parseFloat(); // Get scope's home position's Dec
+  getTerm();
+  Serial.println(ee.dec);
+  writeEE();                                                // Save this to EEPROM
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getDEC() {           // ^d
+  getTerm();
+  Serial.print(F("getDEC() => "));
+  if (serial) TB.print(ee.dec);                             // Return the stored scope's home position's Dec
+  Serial.println(ee.dec);
+  cmd = 0;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void setHA() {            // ^A
+  Serial.println(F("setHA() => "));
+  ee.ha = serial ? TB.parseFloat() : Serial.parseFloat();   // Get scope's home position's Hour Angle
+  getTerm();
+  Serial.print(ee.ha); Serial.println('$');
+  writeEE();                                                // Save this to EEPROM
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getHA() {            // ^a
+  getTerm();
+  Serial.print(F("getHA() => "));
+  if (serial) TB.print(ee.ha);                                // Return the stored scope's parked Hour Angle
+  Serial.print(ee.ha);
+  cmd = 0;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void setMoveTimer() {     // ^M
+  Serial.print(F("setMoveTimer() => "));
+  ee.movePeriod =  serial ? TB.parseInt() : Serial.parseInt(); // Get scope's home position's Dec
+  getTerm();
+  Serial.println(ee.movePeriod);
+  writeEE();                                                  // Save this to EEPROM
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getMoveTimer() {     // ^m
+  getTerm();
+  Serial.print(F("getMoveTimer() => "));
+  if (serial) {
+    TB.print(ee.movePeriod);                                  // Return the stored scope's home position's Dec
+  }
+  Serial.print(ee.movePeriod);
+  cmd = 0;  
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void setMaxSpeed() {      // ^X
+  Serial.print(F("setMaxSpeed() => "));
+  ee.maxSpeed = maxSpeed =  serial ? TB.parseInt() : Serial.parseInt(); // Get scope's home position's Dec
+  getTerm();
+  Serial.println(ee.maxSpeed);
+  writeEE();                                                            // Save this to EEPROM
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getMaxSpeed() {      // ^x
+  getTerm();
+  Serial.print(F("getMaxSpeed() => "));
+  if (serial) TB.print(ee.maxSpeed);                          // Return the maximum speed for roof (0 to 255)
+  Serial.print(ee.maxSpeed);
+  cmd = 0;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void getMovePercent() {   // ^g
+  Serial.print(F("getMoveProg() => "));
+  long v = moveTimer - millis();
+  if (v < 0) v = 0;
+  v = 100 - v / (10 * ee.movePeriod);
+  getTerm();
+  if (serial) TB.print(v);
+  Serial.print(v);
+  cmd = 0;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void version() {          // ^V
+  getTerm();
+  if (serial) TB.print(VERSION);
+  Serial.println(VERSION);
+  cmd = 0;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void variables() {        // ^v
+  getTerm();
+  Serial.println(F("VARIABLES\n========="));
+  Serial.print(F("cmd:            ")); Serial.println(cmd);
+  Serial.print(F("timedOut:       ")); Serial.println(timedOut);
+  Serial.print(F("pwm:            ")); Serial.println(pwm);
+  Serial.print(F("dir:            ")); Serial.println(dir);
+  Serial.print(F("pwmFlag:        ")); Serial.println(pwmFlag);
+  Serial.print(F("scopeSafe:      ")); Serial.println(scopeSafe);
+  Serial.print(F("parkMode:       ")); Serial.println(parkMode);
+  Serial.print(F("stillParking:   ")); Serial.println(stillParking);
+  Serial.print(F("itsRaining:     ")); Serial.println(itsRaining);
+  Serial.print(F("millis():       ")); Serial.println(millis());
+  Serial.print(F("moveTimer:      ")); Serial.println(moveTimer);
+  Serial.print(F("parkTimer:      ")); Serial.println(parkingTimer);
+  Serial.print(F("buzzTimer:      ")); Serial.println(buzzerTimer);
+  Serial.print(F("rainTImer:      ")); Serial.println(rainTimer);
+  Serial.print(F("rampTimer:      ")); Serial.println(rampTimer);
+  Serial.print(F("flashTimer:     ")); Serial.println(flashTimer);
+  Serial.print(F("buttonTimer:    ")); Serial.println(buttonTimer);
+  Serial.print(F("serial:         ")); Serial.println(serial);
+  Serial.print(F("flashType:      ")); Serial.println(flashType);
+  Serial.print(F("flashPos:       ")); Serial.println(flashPos);
+  Serial.print(F("tbBtn:          ")); Serial.println(tbBtn);
+  Serial.print(F("ee.ha:          ")); Serial.println(ee.ha, 1);
+  Serial.print(F("ee.dec:         ")); Serial.println(ee.dec);
+  Serial.print(F("ee.movePeriod:  ")); Serial.println(ee.movePeriod);
+  Serial.print(F("ee.maxSpeed:    ")); Serial.println(ee.maxSpeed);
+  Serial.print(F("ee.park:        ")); Serial.println(ee.park);
+  Serial.print(F("ee.isParked:    ")); Serial.println(ee.isParked);
+  Serial.print(F("ee.safe:        ")); Serial.println(ee.safe);
+  Serial.print(F("ee.rain:        ")); Serial.println(ee.rain);
+  Serial.print(F("ee.battery      ")); Serial.println(ee.battery);
+  Serial.print(F("test:           ")); Serial.print(!test); Serial.println(test);
+  Serial.print(F("sw_open:        ")); Serial.println(sw_open);
+  Serial.print(F("sw_closed:      ")); Serial.println(sw_closed);
+}
+//==================================================================================================================================================
+// HARDWARE STUFF
 //==================================================================================================================================================
 void serviceLED() {
   const int flashLED[5][8] = {
@@ -969,7 +1191,7 @@ void serviceLED() {
   }
   else analogWrite(LED, byte(millis() / 16)/4);                           // Sawtooth flash = all is OK. Cycles every 4096ms 
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void buzz(long d) {               // 0 = turn off buzzer, -1 = continuous beep, < -1 async timer beep, > 0 wait for beep to finish
   Serial.print(F("buzz() => "));
   Serial.println(d);
@@ -985,112 +1207,13 @@ void buzz(long d) {               // 0 = turn off buzzer, -1 = continuous beep, 
     buzzerTimer = millis() - d;   // Set timer of asychronous beep
   }
 }
-//==================================================================================================================================================
-void getTerm() {
-  if (!cmd) return;
-  unsigned long findTimer = millis() + 100;
-  while (millis() < findTimer) {
-    switch (serial ? TB.read() : Serial.read()) {
-      case '$':   return;                   break;
-      case '\n':  return;                   break;
-      case '\r':  return;                   break;
-      case -1:                              break;
-      default: findTimer = millis() + 100;  break;
-    }
-  }
-}
-//==================================================================================================================================================
-int scopeSafeCheck() {
-  if (!ee.safe) return 1;      // Ignore scope's safety - return 'safe'
-  if (test) return safe_T;
-  return scopeSafe;
-}
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 bool button(int btn) {
   byte v = digitalRead(btn);                                              // Get button status
   delay(20);                                                              // Soak up debounce
   return (digitalRead(btn) + v) == 2;                                     // Returns 1 if pressed, 0 if not
 }
-//==================================================================================================================================================
-bool roofOpen() {
-  if (test) return sw_open;
-  return (digitalRead(SW_OPEN));    // 0 = roof not fully open, 1 = fully open (switch closed)
-}
-//==================================================================================================================================================
-bool roofClosed() {
-  if (test) return sw_closed;
-  return (digitalRead(SW_CLOSED));  // 0 = roof not fully closed, 1 = fully closed (switch closed)
-}
-//==================================================================================================================================================
-int battSensor() {
-  if (!ee.battery) return 780;  // Ignore battery sensor - return 'good'
-  if (test) return batt_T;
-  return analogRead(BATTERY);
-}
-//==================================================================================================================================================
-bool batteryCheck() {
-  return ((battSensor() / SENSE_ADJ) > BATT_BAD);
-}
-//==================================================================================================================================================
-bool rainSensor() {
-  if (!ee.rain) return (itsRaining = 0);        // Ignore rain sensor - return 'dry'
-  if (test) return (itsRaining = rain_T);       // Return test mode value
-  return (itsRaining = !digitalRead(RG9));      // RG9 = 0 means it's raining
-}
-//==================================================================================================================================================
-void readEE() {
-  Serial.println(F("readEE()"));
-  if (EEPROM[0] == 'R'  && EEPROM[1] == 'B') {            // See if data has been stored before
-    EEPROM.get(2, ee);                                    // If so the update the stored data as necessary
-  }
-  else formatEE();
-  maxSpeed = ee.maxSpeed;
-}
-//==================================================================================================================================================
-void formatEE() {
-    Serial.println(F("formatEE"));
-    ee.ha = 0.0;
-    ee.dec = -35;
-    ee.movePeriod = MOVE_PERIOD;
-    ee.maxSpeed = maxSpeed = PWM_MAX;
-    ee.park = 1;                                          // Ensure telescope should park
-    ee.isParked = 1;                                      // Ensure is parked
-    ee.battery = 1;                                       // Ensure scope is safe
-    ee.rain = 1;                                          // Enusre rain sensor is monitored
-    ee.battery = 1;                                       // Ensure there is enough power
-    ee.ha = PARK_HA;                                      // Use default parked HA
-    ee.dec = PARK_DEC;                                    // Use default pared DEC
-    writeEE();                                            // Format EEPROM and write data
-}
-//==================================================================================================================================================
-void writeEE() {
-  Serial.println(F("writeEE()"));
-  EEPROM.put(0, 'R');                                     // Write "RB" (short for RoofBuddy) as the header
-  EEPROM.put(1, 'B');
-  EEPROM.put(2, ee);                                      // Write the data
-}
-//==================================================================================================================================================
-void stopISR() {                                      // Come here if either the SW_OPEN or SW_CLOSED switch has been activated
-  noInterrupts();
-  if (!digitalRead(dir == DIR_CLOSE ? SW_CLOSED : SW_OPEN)){
-    interrupts();
-    return;
-  }
-  analogWrite(PWM, 0);                                // Stop the motor immediately
-  detachInterrupt(digitalPinToInterrupt(SW_CLOSED));
-  detachInterrupt(digitalPinToInterrupt(SW_OPEN));
-  interrupts();
-  isr = 1;                                            // Mark that interrupt has been triggered
-  pwm = 0;
-  Serial.print(F("ISR triggered halt: ")); Serial.println((dir == DIR_CLOSE) ? "CLOSE switch" : "OPEN switch");
-  for(byte i = 0; i < 8; i++){
-    digitalWrite(BUZZER, HIGH);
-    delay(50);
-    digitalWrite(BUZZER, LOW);
-    delay(100);
-  }
-}
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void hardware() {         // ^~
   getTerm();
   Serial.println(F("ARDUINO'S PINS\n=============="));
@@ -1115,44 +1238,7 @@ void hardware() {         // ^~
   Serial.print(F("A4  RG9_VCC1:  "));Serial.print(digitalRead(A4));Serial.print(' ');Serial.println(digitalRead(A4));
   Serial.print(F("A5  RG9_VCC1:  "));Serial.print(digitalRead(A5));Serial.print(' ');Serial.println(digitalRead(A5));
 }
-//===================================================================================================================================================
-void variables() {        // ^v
-  getTerm();
-  Serial.println(F("VARIABLES\n========="));
-  Serial.print(F("cmd:            ")); Serial.println(cmd);
-  Serial.print(F("timedOut:       ")); Serial.println(timedOut);
-  Serial.print(F("pwm:            ")); Serial.println(pwm);
-  Serial.print(F("dir:            ")); Serial.println(dir);
-  Serial.print(F("pwmFlag:        ")); Serial.println(pwmFlag);
-  Serial.print(F("scopeSafe:      ")); Serial.println(scopeSafe);
-  Serial.print(F("parkMode:       ")); Serial.println(parkMode);
-  Serial.print(F("stillParking:   ")); Serial.println(stillParking);
-  Serial.print(F("itsRaining:     ")); Serial.println(itsRaining);
-  Serial.print(F("millis():       ")); Serial.println(millis());
-  Serial.print(F("moveTimer:      ")); Serial.println(moveTimer);
-  Serial.print(F("parkTimer:      ")); Serial.println(parkingTimer);
-  Serial.print(F("buzzTimer:      ")); Serial.println(buzzerTimer);
-  Serial.print(F("rampTimer:      ")); Serial.println(rampTimer);
-  Serial.print(F("flashTimer:     ")); Serial.println(flashTimer);
-  Serial.print(F("buttonTimer:    ")); Serial.println(buttonTimer);
-  Serial.print(F("serial:         ")); Serial.println(serial);
-  Serial.print(F("flashType:      ")); Serial.println(flashType);
-  Serial.print(F("flashPos:       ")); Serial.println(flashPos);
-  Serial.print(F("tbBtn:          ")); Serial.println(tbBtn);
-  Serial.print(F("ee.ha:          ")); Serial.println(ee.ha, 1);
-  Serial.print(F("ee.dec:         ")); Serial.println(ee.dec);
-  Serial.print(F("ee.movePeriod:  ")); Serial.println(ee.movePeriod);
-  Serial.print(F("ee.maxSpeed:    ")); Serial.println(ee.maxSpeed);
-  Serial.print(F("ee.park:        ")); Serial.println(ee.park);
-  Serial.print(F("ee.isParked:    ")); Serial.println(ee.isParked);
-  Serial.print(F("ee.safe:        ")); Serial.println(ee.safe);
-  Serial.print(F("ee.rain:        ")); Serial.println(ee.rain);
-  Serial.print(F("ee.battery      ")); Serial.println(ee.battery);
-  Serial.print(F("test:           ")); Serial.print(!test); Serial.println(test);
-  Serial.print(F("sw_open:        ")); Serial.println(sw_open);
-  Serial.print(F("sw_closed:      ")); Serial.println(sw_closed);
-}
-//===================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void hardwareTest() {
   byte sensorFlag = 1;
   while(1) {
@@ -1229,80 +1315,44 @@ void hardwareTest() {
     }
   }
 }
-//===================================================================================================================================================
-void override(){
-  digitalWrite(LED,((millis() & B10000) > 0));                           // Sawtooth flash = all is OK. Cycles every 4096ms 
-  byte pwm = 0;
-  while(1) {
-    if (button(BTN_CLOSE) && !digitalRead(SW_CLOSED)) {
-      while(!button(BTN_OPEN) && !digitalRead(SW_CLOSED)) {
-        pwm ? delay(10) : buzz(50);
-        if (pwm < 191) pwm++;
-        digitalWrite(DIR, DIR_CLOSE);
-        analogWrite(PWM, pwm);
-      }
-    }
-
-    if(pwm) {
-      pwm = 0;
-      analogWrite(PWM, pwm);
-      buzz(50);
-    }
-
-    if (button(BTN_OPEN) && !digitalRead(SW_OPEN)) {
-      while(!button(BTN_CLOSE) && !digitalRead(SW_OPEN)) {
-        pwm ? delay(10) : buzz(50);
-        if (pwm < 191) pwm++;
-
-        digitalWrite(DIR, DIR_OPEN);
-        analogWrite(PWM, pwm);
-      }
-    }
-
-    if(pwm) {
-      pwm = 0;
-      analogWrite(PWM, pwm);
-      buzz(50);
-    }
-  }
-}
-//===================================================================================================================================================
-void testCmds() {         // Z
-  Serial.print(F("testCmds() => Received: "));
-  char buf[] = "\0\0\0";
-  serial ? TB.readBytesUntil('$', buf, 1) : Serial.readBytesUntil('$', buf, 1);
-  cmd = buf[0];
-  Serial.println(cmd);
-
-  switch (cmd) {
-    case 'O':   roofO();      break;  // 'roof open'
-    case '>':   roofO();      break;  // 'roof open'
-    case 'C':   roofC();      break;  // 'roof closed'
-    case '<':   roofC();      break;  // 'roof closed'
-    case 'H':   roofH();      break;  // 'roof partly open'
-    case '-':   roofH();      break;  // 'roof partly open'
-    case 'b':   battT(0);     break;  // 'battery bad'
-    case 'B':   battT(1);     break;  // 'battery good'
-    case 'r':   rainT(0);     break;  // 'not raining'
-    case 'R':   rainT(1);     break;  // 'raining'
-    case 'P':   parkT(1);     break;  // 'scope' not parked
-    case 'p':   parkT(0);     break;  // 'scope' parked
-    case 'l':   lx200T(0);    break;  // 'LX200 not repsonding'
-    case 'L':   lx200T(1);    break;  // 'LX200 responding'
-    case 's':   safeT(0);     break;  // 'scope' not safe
-    case 'S':   safeT(1);     break;  // 'scope' safe
-    case 'v':   testStatus(); break;  // Show test mode status
-    case '?':   testStatus(); break;  // Show test mode status
-    case 'T':                         // Flip test mode status
-      test = !test;
-      sw_closed = sw_open = 0;
-      Serial.print(F("=> ")); Serial.println(test ? F("TEST MODE") : F("LIVE MODE"));
-      break;
-    default:  break;
-  }
-  return;
-}
 //==================================================================================================================================================
+// EEPROM STUFF
+//==================================================================================================================================================
+void readEE() {
+  Serial.println(F("readEE()"));
+  if (EEPROM[0] == 'R'  && EEPROM[1] == 'B') {            // See if data has been stored before
+    EEPROM.get(2, ee);                                    // If so the update the stored data as necessary
+  }
+  else formatEE();
+  maxSpeed = ee.maxSpeed;
+  if (!ee.rain) rainSensor(0);
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void formatEE() {
+    Serial.println(F("formatEE"));
+    ee.ha = 0.0;
+    ee.dec = -35;
+    ee.movePeriod = MOVE_PERIOD;
+    ee.maxSpeed = maxSpeed = PWM_MAX;
+    ee.park = 1;                                          // Ensure telescope should park
+    ee.isParked = 1;                                      // Ensure is parked
+    ee.battery = 1;                                       // Ensure scope is safe
+    ee.rain = 1;                                          // Enusre rain sensor is monitored
+    ee.battery = 1;                                       // Ensure there is enough power
+    ee.ha = PARK_HA;                                      // Use default parked HA
+    ee.dec = PARK_DEC;                                    // Use default pared DEC
+    writeEE();                                            // Format EEPROM and write data
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void writeEE() {
+  Serial.println(F("writeEE()"));
+  EEPROM.put(0, 'R');                                     // Write "RB" (short for RoofBuddy) as the header
+  EEPROM.put(1, 'B');
+  EEPROM.put(2, ee);                                      // Write the data
+}
+//===================================================================================================================================================
+// TEST MODE STUFF
+//===================================================================================================================================================
 void testStatus() {
   Serial.println(F("TEST STATUS\n-----------"));
   Serial.print(F("test:      ")); Serial.println(test ? F("Test mode") : F("Live mode"));
@@ -1317,56 +1367,79 @@ void testStatus() {
   Serial.print(F("lx200_T:   ")); Serial.println(lx200_T ? F("Connected") : F("Disconnected"));
   cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void roofH () {           // Z-
   Serial.println(F("roofH()"));
   sw_open = sw_closed = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void roofC() {            // Z>
   Serial.println(F("roofC()"));
-  sw_open = 0;
+  sw_open = cmd = 0;
   sw_closed = 1;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void roofO() {            // Z<
   Serial.println(F("roofO()"));
   sw_open = 1;
-  sw_closed = 0;
+  sw_closed = cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void battT(byte v) {      // ZB (0) bad, Zb (1) good
   Serial.print(F("battT() => "));
   batt_T = v ? 780 : 304;
   Serial.println(float(batt_T) / SENSE_ADJ, 1);
   cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void rainT(byte v) {      // Zr (0) wet  ZR (1) dry
   Serial.print(F("rainT() => "));
   rain_T = v ? 1023 : 0;
   Serial.println(rain_T > 511 ? F("Dry") : F("Wet"));
   cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void parkT(byte v) {      // ZP (0) not parked, Zp (1) parked
   Serial.print(F("parkT() => "));
   park_T = v;
   Serial.println(park_T ? F("Parked") : F("Not parked"));
   cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void safeT(byte v) {      // Zs (0) not safe, ZS (1) safe
   Serial.println(F("safe() => "));
   scopeSafe = safe_T = v;
   Serial.println(scopeSafe ? F("Safe") : F("Not safe"));
   cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
 void lx200T(byte v) {     // Zl (0) not connected, ZL (1) connected
   Serial.println(F("lx200T()"));
   lx200_T = v;
   Serial.println(lx200_T ? F("Connected") : F("Disconnected"));
   cmd = 0;
 }
-//==================================================================================================================================================
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void lx200cmd() {         // ^:
+  getTerm();
+  Serial.print(F("lx200cmd() "));                         // Sends LX200 command and returns any response from the LX200
+  cmd = '%';                                              // Assume this is going fail
+  char buf[34];
+  for (byte i = 0; i <= 33; i++) buf[i] = 0;              // Clear the buffer
+  if (!Serial.readBytesUntil('#', buf, 33)) return;       // Get command for the LX200 into the buffer
+  Serial.print(F("=> :"));
+  Serial.print(buf);
+  Serial.println('#');
+  if (!digitalRead(LX_CXN)) return;                       // Quit if no Bluetooth connection with LX200
+  LX.listen();                                            // Now get the LX200's attention
+  LX.print(F("#:")); LX.print(buf); LX.print('#');        // Send command and terminator
+  for (byte i = 0; i <= 33; i++) buf[i] = 0;              // Clear the buffer
+  LX.readBytesUntil('#', buf, 33);                        // Get LX200 response, if any
+  TB.listen();                                            // Thank you LX200.  Now listen to the TopBox again
+  if (buf[0]) {                                           // If there is a repsonse then send it to the TopBox
+    Serial.print(F("=>")); Serial.print(buf); Serial.println('#');
+    if (serial) TB.print(buf);
+    cmd = 0;
+  }
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------
