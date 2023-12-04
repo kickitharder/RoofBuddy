@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#define VERSION "RoofBuddy V0.221207 by keithrickard@hotmail.com"
+#define VERSION "RoofBuddy V0.231203 by keithrickard@hotmail.com"
   
 /* Work commenced 14 Jan 2022 - For the Arduino Uno
 
@@ -198,6 +198,7 @@ void commands(byte s) {
     case 'C': closeRoof();                break;    // Close roof completely
     case 'c': topBoxClose();              break;    // TopBox open button has been pressed to close roof
     case 's': status();                   break;    // 'C' = Closed, 'c' = closing, 'O' = Opened, 'o' = Opening, 'H' = Stopped, etc
+    case 'w': swStatus();                 break;    // 'M' = both switches open, 'O' open switch closed, 'C' close switch closed
     case 'b': getBattery();               break;    // Returns battery voltage. >= 12.5V = OK, < 12.5V = Charge battery
     case 'R': rainSensor(2);              break;    // Restart Rain Sensor
     case 'r': getRainSensor();            break;    // Returns: 1 = wet, 0 = dry
@@ -891,6 +892,15 @@ void status() {           // ^s
     l = LXCXN_OPEN  Telescope not repsonding while parking to open
     L = LXCXN_CLOSE Telescepe not responding while parking to close
     */
+//--------------------------------------------------------------------------------------------------------------------------------------------------
+void swStatus() {         // ^w
+  cmd = 'M';                                // Middle/Moving - both switches are open
+
+  if (roofOpen()) cmd = 'O';                // Open Switch is closed
+  if (roofClosed()) cmd = 'C';              // Closed Switch is closed
+  // if (digitalRead(SW_OPEN)) cmd = 'O';      // Open Switch is closed
+  // if (digitalRead(SW_CLOSED)) cmd = 'C';    // Closed Switch is closed
+}
 //==================================================================================================================================================
 // BATTERY STUFF
 //==================================================================================================================================================
